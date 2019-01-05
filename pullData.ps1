@@ -18,13 +18,13 @@
 
 $server = "localhost\SQLEXPRESS"
 $database = "keyforge9"
- #I believe the page size is 30 max
-$pagesize = 25
+$pagesize = 25 #max accepted is 25
 $search = ""
-$totalCards = 350
+$totalCards = 360
 $totalHouses = 7
 
 if (-not (Find-DbaDatabase -SqlInstance $server -Pattern $database)) { # If the database doesn't exist
+    Write-Host "Creating DB"
     New-DbaDatabase -SqlInstance $server -Name $database # create the database
       
     #####################
@@ -106,81 +106,86 @@ if (-not (Find-DbaDatabase -SqlInstance $server -Pattern $database)) { # If the 
     Invoke-DbaQuery -ServerInstance $server -Database $database -Query "CREATE TABLE factDeckHouses (DeckID INT NOT NULL, House VARCHAR(255) NOT NULL, CONSTRAINT UC_DeckHouses UNIQUE(DeckID, House))"
     Invoke-DbaQuery -ServerInstance $server -Database $database -Query "CREATE TABLE factDeckCards (DeckID INT NOT NULL, CardID INT NOT NULL)" # originally had a unique constraint, but decks can have the same card multiple times
 
+} else {
+    Write-Host "DB Already Exists"
+}
+$totalPages = 10
 
+foreach ($page in 1..$totalPages){
+    $url = "https://www.keyforgegame.com/api/decks/?links=cards&page_size=25&page=$page"
     
-    $totalPages = [math]::Ceiling($decks.count / $pagesize)
-    $totalPages = 5388
+    Write-Host "On page $page of $totalPages : $url"
 
-    foreach ($page in 5249..$totalPages){
-        Write-Host "On page $page of $totalPages"
-        $url = "https://www.keyforgegame.com/api/decks/?links=cards&page_size=25&page=$page"
+    $Response = Invoke-WebRequest $url -ContentType 'application/json; charset=utf8' -UseBasicParsing
+    $jsonCorrected = [Text.Encoding]::UTF8.GetString(
+                [Text.Encoding]::GetEncoding(28591).GetBytes($Response.Content)
+            )
+    $body = $jsonCorrected |ConvertFrom-Json
 
-        $Response = Invoke-WebRequest $url -ContentType 'application/json; charset=utf8' -UseBasicParsing
-        $jsonCorrected = [Text.Encoding]::UTF8.GetString(
-                  [Text.Encoding]::GetEncoding(28591).GetBytes($Response.Content)
-                )
-        $body = $jsonCorrected |ConvertFrom-Json
-
-        $totalPages = [math]::Ceiling($body.count / $pagesize)
+    $totalPages = [math]::Ceiling($body.count / $pagesize)
 
 
-        $DeckCount = 0
-        foreach($deck in $body.data){
-            $DeckCount ++ 
-            write-host "       Deck # $DeckCount of $pagesize"
+    $DeckCount = 0
+    foreach($deck in $body.data){
+        $DeckCount ++ 
+        write-host -NoNewline "       Page #$page Deck $DeckCount / $pagesize "
 
-            $query = "SELECT * FROM dimDecks WHERE deckkeyforgeid = '$($deck.id)'"
-            $response = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
+        $query = "SELECT * FROM dimDecks WHERE deckkeyforgeid = '$($deck.id)'"
+        $response = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
 
-            if (-not $Response){ # Deck hasn't been added
+        if (-not $Response){ # Deck hasn't been added
 
-                $DeckTable = $deck | Select-Object @{N="FirstColumn";E={0}}, id, name, expansion, power_level, chains, wins, losses, notes
-                Write-DbaDataTable -SqlInstance $server -Database $database -Table dimDecks -InputObject $DeckTable
+            $DeckTable = $deck | Select-Object @{N="FirstColumn";E={0}}, id, name, expansion, power_level, chains, wins, losses, notes
+            Write-DbaDataTable -SqlInstance $server -Database $database -Table dimDecks -InputObject $DeckTable
 
-                $DeckID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query "SELECT deckID FROM dimDecks WHERE DeckKeyforgeID = '$($deck.id)'"
-                $DeckID = $DeckID.DeckID
+            $DeckID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query "SELECT deckID FROM dimDecks WHERE DeckKeyforgeID = '$($deck.id)'"
+            $DeckID = $DeckID.DeckID
 
-                foreach ($house in $deck._links.houses){
-                    Invoke-DbaQuery -SqlInstance $server -Database $database -Query "INSERT INTO factDeckHouses VALUES ($DeckID, '$house')"
-                }
+            foreach ($house in $deck._links.houses){
+                Invoke-DbaQuery -SqlInstance $server -Database $database -Query "INSERT INTO factDeckHouses VALUES ($DeckID, '$house')"
+            }
 
-                foreach ($card in $deck._links.cards){
-                    $CardID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query "SELECT cardID from dimCards WHERE CardKeyforgeID = '$card'"
+            foreach ($card in $deck._links.cards){
+                $CardID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query "SELECT cardID from dimCards WHERE CardKeyforgeID = '$card'"
+                $CardID = $CardID.CardID
+
+                if (-not $CardID){
+                    Write-Host  -NoNewline " > Adding New Card: $card > "
+                    $card = $body._linked.cards | Where-Object {$_.id -eq $card}
+                    $CardTable = $card | Select-Object @{N="FirstColumn";E={0}}, id, card_number, card_title, house, card_type, front_image, card_text, amber, power, armor, rarity, flavor_text, expansion, is_maverick
+                    Write-DbaDataTable -SqlInstance $server -Database $database -Table dimCards -InputObject ($CardTable) 
+
+                    $query = "SELECT cardID from dimCards WHERE CardKeyforgeID = '$($card.id)'"
+                    $CardID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
                     $CardID = $CardID.CardID
 
-                    if (-not $CardID){
-                        Write-Host "Adding New Card to Database.  ID: $card"
-                        $card = $body._linked.cards | Where-Object {$_.id -eq $card}
-                        $CardTable = $card | Select-Object @{N="FirstColumn";E={0}}, id, card_number, card_title, house, card_type, front_image, card_text, amber, power, armor, rarity, flavor_text, expansion, is_maverick
-                        Write-DbaDataTable -SqlInstance $server -Database $database -Table dimCards -InputObject ($CardTable) 
-
-                        $query = "SELECT cardID from dimCards WHERE CardKeyforgeID = '$($card.id)'"
-                        $CardID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
-                        $CardID = $CardID.CardID
-
-                        $TraitsXCards = $card | Where-Object {$_.traits} | Select-Object id, traits
-                        foreach ($card in $TraitsXCards | Select-Object id, @{Name="Traits";Expression={$_.traits -split (' • ')}}){
-                            $query = "select TraitID from dimTraits where TraitName = '$trait'"
+                    $TraitsXCards = $card | Where-Object {$_.traits} | Select-Object id, traits
+                    foreach ($card in $TraitsXCards | Select-Object id, @{Name="Traits";Expression={$_.traits -split (' • ')}}){
+                        $query = "select TraitID from dimTraits where TraitName = '$trait'"
+                        $TraitID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
+                        if (-not $TraitID){
+                            Write-Host " > Adding New Trait: $trait > "
+                            $InsertQuery = "INSERT INTO dimTraits VALUES ('$trait')"
+                            Invoke-DbaQuery -SqlInstance $server -Database $database -Query $InsertQuery
                             $TraitID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
-                            if (-not $TraitID){
-                                Write-Host "Adding New Trait to Database.  ID: $trait"
-                                $InsertQuery = "INSERT INTO dimTraits VALUES ('$trait')"
-                                Invoke-DbaQuery -SqlInstance $server -Database $database -Query $InsertQuery
-                                $TraitID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
-                            }
-                            $query = "SELECT * from factCardTraits WHERE CardID = $CardID AND TraitID = $($TraitID.TraitID)"
-                            $Response = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
-                            if (-not $Response){
-                                $query = "INSERT INTO factCardTraits VALUES ($CardID, $($TraitID.TraitID))"
-                                Invoke-DbaQuery -ServerInstance $server -Database $database -Query $query
-                            }
+                        }
+                        $query = "SELECT * from factCardTraits WHERE CardID = $CardID AND TraitID = $($TraitID.TraitID)"
+                        $Response = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
+                        if (-not $Response){
+                            $query = "INSERT INTO factCardTraits VALUES ($CardID, $($TraitID.TraitID))"
+                            Invoke-DbaQuery -ServerInstance $server -Database $database -Query $query
                         }
                     }
-
-                    #Write-Host "INSERT INTO factDeckCards VALUES ($DeckID, $CardID); $card"
-                    Invoke-DbaQuery -SqlInstance $server -Database $database -Query "INSERT INTO factDeckCards VALUES ($DeckID, $CardID)"
                 }
+
+                #Write-Host "INSERT INTO factDeckCards VALUES ($DeckID, $CardID); $card"
+                Invoke-DbaQuery -SqlInstance $server -Database $database -Query "INSERT INTO factDeckCards VALUES ($DeckID, $CardID)"
             }
+            
+            write-host "done"
+        }
+        else {
+            write-host "already exists"
         }
     }
 }
