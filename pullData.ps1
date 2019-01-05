@@ -17,7 +17,7 @@
 # install-module dbatools # (need to run as admin)
 
 $server = "localhost\SQLEXPRESS"
-$database = "keyforge"
+$database = "keyforge9"
  #I believe the page size is 30 max
 $pagesize = 25
 $search = ""
@@ -35,7 +35,7 @@ if (-not (Find-DbaDatabase -SqlInstance $server -Pattern $database)) { # If the 
     $cards = [System.Collections.Generic.List[object]]::new()
     $houses = [System.Collections.Generic.List[object]]::new()
     do {
-        $Response = Invoke-WebRequest ($url -f $page++) -ContentType 'application/json; charset=utf8'
+        $Response = Invoke-WebRequest ($url -f $page++) -ContentType 'application/json; charset=utf8' -UseBasicParsing
         $jsonCorrected = [Text.Encoding]::UTF8.GetString(
                   [Text.Encoding]::GetEncoding(28591).GetBytes($Response.Content)
                 )
@@ -115,7 +115,7 @@ if (-not (Find-DbaDatabase -SqlInstance $server -Pattern $database)) { # If the 
         Write-Host "On page $page of $totalPages"
         $url = "https://www.keyforgegame.com/api/decks/?links=cards&page_size=25&page=$page"
 
-        $Response = Invoke-WebRequest $url -ContentType 'application/json; charset=utf8'
+        $Response = Invoke-WebRequest $url -ContentType 'application/json; charset=utf8' -UseBasicParsing
         $jsonCorrected = [Text.Encoding]::UTF8.GetString(
                   [Text.Encoding]::GetEncoding(28591).GetBytes($Response.Content)
                 )
@@ -163,6 +163,7 @@ if (-not (Find-DbaDatabase -SqlInstance $server -Pattern $database)) { # If the 
                             $query = "select TraitID from dimTraits where TraitName = '$trait'"
                             $TraitID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
                             if (-not $TraitID){
+                                Write-Host "Adding New Trait to Database.  ID: $trait"
                                 $InsertQuery = "INSERT INTO dimTraits VALUES ('$trait')"
                                 Invoke-DbaQuery -SqlInstance $server -Database $database -Query $InsertQuery
                                 $TraitID = Invoke-DbaQuery -SqlInstance $server -Database $database -Query $query
